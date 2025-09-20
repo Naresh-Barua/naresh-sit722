@@ -1,0 +1,83 @@
+name: CI - Test, Build & Push (testing)
+
+on:
+  push:
+    branches: [ testing ]
+
+env:
+  ACR_NAME: nareshacr10d
+  ACR_LOGIN_SERVER: nareshacr10d.azurecr.io
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - backend/customer_service
+          - backend/order_service
+          - backend/product_service
+          - frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      # -------- Backend (Python) --------
+      - name: Set up Python
+        if: startsWith(matrix.service, 'backend/')
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps (backend)
+        if: startsWith(matrix.service, 'backend/')
+        run: pip install -r ${{ matrix.service }}/requirements-dev.txt
+
+      - name: Run tests (backend)
+        if: startsWith(matrix.service, 'backend/')
+        run: pytest -q ${{ matrix.service }}/tests
+
+      # -------- Frontend (Node) --------
+      - name: Set up Node
+        if: matrix.service == 'frontend'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Frontend build check
+        if: matrix.service == 'frontend'
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+  build_and_push:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (service principal)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: ACR login
+        run: az acr login --name $ACR_NAME
+
+      - name: Build images
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/customer-service:${IMAGE_TAG} backend/customer_service
+          docker build -t $ACR_LOGIN_SERVER/order-service:${IMAGE_TAG}    backend/order_service
+          docker build -t $ACR_LOGIN_SERVER/product-service:${IMAGE_TAG}  backend/product_service
+          docker build -t $ACR_LOGIN_SERVER/frontend:${IMAGE_TAG}         frontend
+
+      - name: Push images
+        run: |
+          docker push $ACR_LOGIN_SERVER/customer-service:${IMAGE_TAG}
+          docker push $ACR_LOGIN_SERVER/order-service:${IMAGE_TAG}
+          docker push $ACR_LOGIN_SERVER/product-service:${IMAGE_TAG}
+          docker push $ACR_LOGIN_SERVER/frontend:${IMAGE_TAG}
