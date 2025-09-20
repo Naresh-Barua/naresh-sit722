@@ -1,0 +1,63 @@
+name: CD – Deploy to AKS (prod)
+
+on:
+  push:
+    branches: [ main ]        # merge to main => deploy
+
+env:
+  RG_NAME: sit722-10-2d-rg
+  AKS_NAME: sit722-aks
+  ACR_NAME: nareshacr10d
+  K8S_DIR: task10_2d/k8s
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (service principal JSON)
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: az aks get-credentials -g "$RG_NAME" -n "$AKS_NAME" --overwrite-existing
+
+      # We’ll just use the latest tag pushed to ACR (they all share the same tag in your CI)
+      - name: Resolve image tag from ACR (latest)
+        id: tag
+        shell: bash
+        run: |
+          TAG=$(az acr repository show-tags \
+                -n "$ACR_NAME" --repository frontend \
+                --top 1 --orderby time_desc -o tsv)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using tag: $TAG"
+
+      # Stamp the tag into kustomization.yaml (newTag: IMAGE_TAG_HERE -> newTag: <tag>)
+      - name: Inject image tag into k8s manifests
+        shell: bash
+        run: |
+          sed -i "s/IMAGE_TAG_HERE/${{ steps.tag.outputs.tag }}/g" "${K8S_DIR}/kustomization.yaml"
+          echo "==== kustomization.yaml ===="
+          cat "${K8S_DIR}/kustomization.yaml"
+
+      - name: Deploy to AKS (prod namespace via kustomize)
+        shell: bash
+        run: |
+          kubectl apply -k "${K8S_DIR}"
+          echo "--- Resources in prod ---"
+          kubectl get deploy,svc,pods -n prod
+
+      # Prove frontend updated & healthy (don’t fail the build if backends crash)
+      - name: Wait for frontend rollout
+        shell: bash
+        run: |
+          kubectl rollout status deploy/frontend -n prod --timeout=180s || true
+          kubectl get svc frontend -n prod -o wide
