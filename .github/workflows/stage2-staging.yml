@@ -10,7 +10,7 @@ env:
   LOCATION: australiaeast
   ACR_NAME: nareshacr10d
   ACR_LOGIN_SERVER: nareshacr10d.azurecr.io
-  IMAGE_TAG: 3d5b1eba6b7928fdf4ac302d2195e9dcb6ff1f86              
+  IMAGE_TAG: 3d5b1eba6b7928fdf4ac302d2195e9dcb6ff1f86   # full tag is fine
   RUN_ID: ${{ github.run_id }}
 
 jobs:
@@ -28,8 +28,17 @@ jobs:
         run: |
           az group create -n "$RG_NAME" -l "$LOCATION" 1>/dev/null
 
+      # ----------------- NEW: fetch ACR admin creds once -----------------
+      - name: Prep registry auth (use ACR admin user)
+        id: reg
+        run: |
+          # Ensure admin user is enabled, then read its username/password
+          az acr update -n "$ACR_NAME" --admin-enabled true 1>/dev/null
+          echo "REG_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_OUTPUT
+          echo "REG_USER=$(az acr credential show -n $ACR_NAME --query username -o tsv)" >> $GITHUB_OUTPUT
+          echo "REG_PASS=$(az acr credential show -n $ACR_NAME --query passwords[0].value -o tsv)" >> $GITHUB_OUTPUT
+
       # ----------------- Deploy 4 x ACI (Linux) -----------------
-      
       - name: Deploy customer-service (ACI)
         run: |
           az container create \
@@ -37,9 +46,9 @@ jobs:
             -n cs-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/customer-service:${IMAGE_TAG} \
-            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
-            --registry-username "${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" \
-            --registry-password "${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" \
+            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
+            --registry-username     "${{ steps.reg.outputs.REG_USER }}" \
+            --registry-password     "${{ steps.reg.outputs.REG_PASS }}" \
             --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
@@ -54,9 +63,9 @@ jobs:
             -n os-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/order-service:${IMAGE_TAG} \
-            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
-            --registry-username "${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" \
-            --registry-password "${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" \
+            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
+            --registry-username     "${{ steps.reg.outputs.REG_USER }}" \
+            --registry-password     "${{ steps.reg.outputs.REG_PASS }}" \
             --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
@@ -71,9 +80,9 @@ jobs:
             -n ps-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/product-service:${IMAGE_TAG} \
-            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
-            --registry-username "${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" \
-            --registry-password "${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" \
+            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
+            --registry-username     "${{ steps.reg.outputs.REG_USER }}" \
+            --registry-password     "${{ steps.reg.outputs.REG_PASS }}" \
             --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
@@ -88,9 +97,9 @@ jobs:
             -n fe-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG} \
-            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
-            --registry-username "${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" \
-            --registry-password "${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" \
+            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
+            --registry-username     "${{ steps.reg.outputs.REG_USER }}" \
+            --registry-password     "${{ steps.reg.outputs.REG_PASS }}" \
             --os-type Linux \
             --cpu 1 --memory 1.0 \
             --ports 80 \
@@ -109,6 +118,21 @@ jobs:
               [ "$STATE" = "Running" ] && break
               sleep 5
             done
+          done
+
+      - name: Debug ACI state + logs (if not Running)
+        if: always()
+        run: |
+          for NAME in cs os ps fe; do
+            echo "===== $NAME-${RUN_ID} STATUS ====="
+            az container show -g "$RG_NAME" -n ${NAME}-${RUN_ID} --query "{name:name,state:instanceView.state,prov:provisioningState}" -o table || true
+            echo "===== $NAME-${RUN_ID} CURRENT STATE ====="
+            az container show -g "$RG_NAME" -n ${NAME}-${RUN_ID} --query "containers[0].instanceView.currentState" -o json || true
+            echo "===== $NAME-${RUN_ID} EVENTS ====="
+            az container show -g "$RG_NAME" -n ${NAME}-${RUN_ID} --query "containers[0].instanceView.events" -o table || true
+            echo "===== $NAME-${RUN_ID} LOGS ====="
+            az container logs -g "$RG_NAME" -n ${NAME}-${RUN_ID} || true
+            echo
           done
 
       - name: Health check endpoints (non-blocking)
