@@ -28,15 +28,14 @@ jobs:
         run: |
           az group create -n "$RG_NAME" -l "$LOCATION" 1>/dev/null
 
-      - name: Prep registry auth (use SP creds)
+      - name: Prep registry auth (use SP creds from AZURE_CREDENTIALS)
         id: reg
         run: |
           echo "REG_SERVER=${ACR_LOGIN_SERVER}" >> $GITHUB_OUTPUT
-          # Use the same SP that logged-in this workflow
           echo "REG_USER=${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" >> $GITHUB_OUTPUT
           echo "REG_PASS=${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" >> $GITHUB_OUTPUT
 
-      # ---------- Create temporary ACI for each service ----------
+      # ----------------- Deploy 4 x ACI (Linux) -----------------
       - name: Deploy customer-service (ACI)
         run: |
           az container create \
@@ -47,6 +46,7 @@ jobs:
             --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
             --registry-username "${{ steps.reg.outputs.REG_USER }}" \
             --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
             --ip-address Public \
@@ -63,6 +63,7 @@ jobs:
             --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
             --registry-username "${{ steps.reg.outputs.REG_USER }}" \
             --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
             --ip-address Public \
@@ -79,6 +80,7 @@ jobs:
             --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
             --registry-username "${{ steps.reg.outputs.REG_USER }}" \
             --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
             --ip-address Public \
@@ -95,13 +97,14 @@ jobs:
             --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
             --registry-username "${{ steps.reg.outputs.REG_USER }}" \
             --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --os-type Linux \
             --cpu 1 --memory 1.0 \
             --ports 80 \
             --ip-address Public \
             --dns-name-label fe-${RUN_ID} \
             --restart-policy Never
 
-      # ---------- Simple health checks with retries ----------
+      # ----------------- Health checks -----------------
       - name: Wait for containers to be Running
         run: |
           for NAME in cs os ps fe; do
@@ -114,17 +117,16 @@ jobs:
             done
           done
 
-      - name: Health check endpoints
-        continue-on-error: true   # demo-friendly: don't fail the whole job
+      - name: Health check endpoints (non-blocking demo)
+        continue-on-error: true
         run: |
-          set -e
           FRONTEND=http://fe-${RUN_ID}.${LOCATION}.azurecontainer.io
           CS=http://cs-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
           OS=http://os-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
           PS=http://ps-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
 
           check() {
-            URL="$1"; NAME="$2"; PORT="$3"
+            URL="$1"; NAME="$2"
             echo "Checking $NAME at $URL ..."
             for i in {1..15}; do
               CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
@@ -135,16 +137,16 @@ jobs:
               fi
               sleep 4
             done
-            echo "$NAME did not pass health check (non-blocking in demo)."
+            echo "$NAME did not pass health check (ignored in demo)."
             return 0
           }
 
-          check "$FRONTEND" "frontend" 80
-          check "$CS" "customer-service" 8000
-          check "$OS" "order-service" 8000
-          check "$PS" "product-service" 8000
+          check "$FRONTEND" "frontend"
+          check "$CS" "customer-service"
+          check "$OS" "order-service"
+          check "$PS" "product-service"
 
-      # ---------- Always clean up (destroy staging) ----------
+      # ----------------- Always destroy staging -----------------
       - name: Destroy staging (ACI)
         if: always()
         run: |
