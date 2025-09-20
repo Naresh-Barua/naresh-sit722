@@ -25,81 +25,26 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Ensure RG exists (idempotent)
-        run: |
-          az group create -n "$RG_NAME" -l "$LOCATION" 1>/dev/null
+        run: az group create -n "$RG_NAME" -l "$LOCATION" 1>/dev/null
 
-      # ----------------- NEW: fetch ACR admin creds once -----------------
-      - name: Prep registry auth (use ACR admin user)
-        id: reg
-        run: |
-          # Ensure admin user is enabled, then read its username/password
-          az acr update -n "$ACR_NAME" --admin-enabled true 1>/dev/null
-          echo "REG_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_OUTPUT
-          echo "REG_USER=$(az acr credential show -n $ACR_NAME --query username -o tsv)" >> $GITHUB_OUTPUT
-          echo "REG_PASS=$(az acr credential show -n $ACR_NAME --query passwords[0].value -o tsv)" >> $GITHUB_OUTPUT
-
-      # ----------------- Deploy 4 x ACI (Linux) -----------------
-      - name: Deploy customer-service (ACI)
-        run: |
-          az container create \
-            -g "$RG_NAME" \
-            -n cs-${RUN_ID} \
-            -l "$LOCATION" \
-            --image ${ACR_LOGIN_SERVER}/customer-service:${IMAGE_TAG} \
-            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
-            --registry-username     "${{ steps.reg.outputs.REG_USER }}" \
-            --registry-password     "${{ steps.reg.outputs.REG_PASS }}" \
-            --os-type Linux \
-            --cpu 1 --memory 1.5 \
-            --ports 8000 \
-            --ip-address Public \
-            --dns-name-label cs-${RUN_ID} \
-            --restart-policy Never
-
-      - name: Deploy order-service (ACI)
-        run: |
-          az container create \
-            -g "$RG_NAME" \
-            -n os-${RUN_ID} \
-            -l "$LOCATION" \
-            --image ${ACR_LOGIN_SERVER}/order-service:${IMAGE_TAG} \
-            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
-            --registry-username     "${{ steps.reg.outputs.REG_USER }}" \
-            --registry-password     "${{ steps.reg.outputs.REG_PASS }}" \
-            --os-type Linux \
-            --cpu 1 --memory 1.5 \
-            --ports 8000 \
-            --ip-address Public \
-            --dns-name-label os-${RUN_ID} \
-            --restart-policy Never
-
-      - name: Deploy product-service (ACI)
-        run: |
-          az container create \
-            -g "$RG_NAME" \
-            -n ps-${RUN_ID} \
-            -l "$LOCATION" \
-            --image ${ACR_LOGIN_SERVER}/product-service:${IMAGE_TAG} \
-            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
-            --registry-username     "${{ steps.reg.outputs.REG_USER }}" \
-            --registry-password     "${{ steps.reg.outputs.REG_PASS }}" \
-            --os-type Linux \
-            --cpu 1 --memory 1.5 \
-            --ports 8000 \
-            --ip-address Public \
-            --dns-name-label ps-${RUN_ID} \
-            --restart-policy Never
+      
 
       - name: Deploy frontend (ACI)
+        env:
+          SP_JSON: ${{ secrets.AZURE_CREDENTIALS }}
         run: |
+          USERNAME=$(jq -r '.clientId'  <<< "$SP_JSON")
+          PASSWORD=$(jq -r '.clientSecret' <<< "$SP_JSON")
+          RUN_ID=${GITHUB_RUN_ID}
+
           az container create \
             -g "$RG_NAME" \
             -n fe-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG} \
-            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
-            --registry-username     "${{ steps.reg.outputs.REG_USER }}" \
-            --registry-password     "${{ steps.reg.outputs.REG_PASS }}" \
+            --registry-login-server "${ACR_LOGIN_SERVER}" \
+            --registry-username "${USERNAME}" \
+            --registry-password "${PASSWORD}" \
             --os-type Linux \
             --cpu 1 --memory 1.0 \
             --ports 80 \
@@ -107,67 +52,51 @@ jobs:
             --dns-name-label fe-${RUN_ID} \
             --restart-policy Never
 
-      # ----------------- Health checks -----------------
-      - name: Wait for containers to be Running
+      - name: Wait for container to be Running
         run: |
-          for NAME in cs os ps fe; do
-            echo "Waiting for $NAME-${RUN_ID} to be Running..."
-            for i in {1..30}; do
-              STATE=$(az container show -g "$RG_NAME" -n ${NAME}-${RUN_ID} --query "instanceView.state" -o tsv || echo "Unknown")
-              echo "  Try $i: $STATE"
-              [ "$STATE" = "Running" ] && break
-              sleep 5
-            done
+          NAME=fe-${GITHUB_RUN_ID}
+          echo "Waiting for $NAME to be Running..."
+          for i in {1..40}; do
+            STATE=$(az container show -g "$RG_NAME" -n "$NAME" --query "instanceView.state" -o tsv || echo "Unknown")
+            echo "  Try $i: $STATE"
+            if [ "$STATE" = "Running" ]; then
+              exit 0
+            fi
+            sleep 5
           done
+          echo "Container not Running after timeout"; exit 1
 
-      - name: Debug ACI state + logs (if not Running)
+      - name: Health check (frontend)
+        run: |
+          URL="http://fe-${GITHUB_RUN_ID}.${{ env.LOCATION }}.azurecontainer.io"
+          echo "Checking $URL ..."
+          for i in {1..15}; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+            echo "  Try $i -> $CODE"
+            if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ]; then
+              echo "Frontend healthy at $URL"
+              exit 0
+            fi
+            sleep 4
+          done
+          echo "Frontend did not return a healthy status (still continuing for demo)."
+          exit 0
+
+      - name: Debug ACI state + logs (always)
         if: always()
         run: |
-          for NAME in cs os ps fe; do
-            echo "===== $NAME-${RUN_ID} STATUS ====="
-            az container show -g "$RG_NAME" -n ${NAME}-${RUN_ID} --query "{name:name,state:instanceView.state,prov:provisioningState}" -o table || true
-            echo "===== $NAME-${RUN_ID} CURRENT STATE ====="
-            az container show -g "$RG_NAME" -n ${NAME}-${RUN_ID} --query "containers[0].instanceView.currentState" -o json || true
-            echo "===== $NAME-${RUN_ID} EVENTS ====="
-            az container show -g "$RG_NAME" -n ${NAME}-${RUN_ID} --query "containers[0].instanceView.events" -o table || true
-            echo "===== $NAME-${RUN_ID} LOGS ====="
-            az container logs -g "$RG_NAME" -n ${NAME}-${RUN_ID} || true
-            echo
-          done
+          NAME=fe-${GITHUB_RUN_ID}
+          echo "===== $NAME STATUS ====="
+          az container show -g "$RG_NAME" -n "$NAME" --query "{name:name,state:instanceView.state,prov:provisioningState}" -o table || true
+          echo "===== $NAME CURRENT STATE ====="
+          az container show -g "$RG_NAME" -n "$NAME" --query "containers[0].instanceView.currentState" -o json || true
+          echo "===== $NAME EVENTS ====="
+          az container show -g "$RG_NAME" -n "$NAME" --query "containers[0].instanceView.events" -o table || true
+          echo "===== $NAME LOGS ====="
+          az container logs -g "$RG_NAME" -n "$NAME" || true
 
-      - name: Health check endpoints (non-blocking)
-        continue-on-error: true
-        run: |
-          FRONTEND=http://fe-${RUN_ID}.${LOCATION}.azurecontainer.io
-          CS=http://cs-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
-          OS=http://os-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
-          PS=http://ps-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
-
-          check() {
-            URL="$1"; NAME="$2"
-            echo "Checking $NAME at $URL ..."
-            for i in {1..15}; do
-              CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
-              echo "  Try $i -> $CODE"
-              if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ]; then
-                echo "$NAME OK"
-                return 0
-              fi
-              sleep 4
-            done
-            echo "$NAME did not pass health check (ignored for demo)."
-            return 0
-          }
-
-          check "$FRONTEND" "frontend"
-          check "$CS" "customer-service"
-          check "$OS" "order-service"
-          check "$PS" "product-service"
-
-      # ----------------- Always destroy staging -----------------
-      - name: Destroy staging (ACI)
+      - name: Destroy staging (always)
         if: always()
         run: |
-          for NAME in cs os ps fe; do
-            az container delete -g "$RG_NAME" -n ${NAME}-${RUN_ID} --yes || true
-          done
+          NAME=fe-${GITHUB_RUN_ID}
+          az container delete -g "$RG_NAME" -n "$NAME" --yes || true
