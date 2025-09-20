@@ -10,7 +10,7 @@ env:
   LOCATION: australiaeast
   ACR_NAME: nareshacr10d
   ACR_LOGIN_SERVER: nareshacr10d.azurecr.io
-  IMAGE_TAG: ${{ github.sha }}
+  IMAGE_TAG: 3d5b1eba6b7928fdf4ac302d2195e9dcb6ff1f86              
   RUN_ID: ${{ github.run_id }}
 
 jobs:
@@ -28,14 +28,8 @@ jobs:
         run: |
           az group create -n "$RG_NAME" -l "$LOCATION" 1>/dev/null
 
-      - name: Prep registry auth (use SP creds from AZURE_CREDENTIALS)
-        id: reg
-        run: |
-          echo "REG_SERVER=${ACR_LOGIN_SERVER}" >> $GITHUB_OUTPUT
-          echo "REG_USER=${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" >> $GITHUB_OUTPUT
-          echo "REG_PASS=${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" >> $GITHUB_OUTPUT
-
       # ----------------- Deploy 4 x ACI (Linux) -----------------
+      
       - name: Deploy customer-service (ACI)
         run: |
           az container create \
@@ -43,9 +37,9 @@ jobs:
             -n cs-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/customer-service:${IMAGE_TAG} \
-            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
-            --registry-username "${{ steps.reg.outputs.REG_USER }}" \
-            --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
+            --registry-username "${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" \
+            --registry-password "${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" \
             --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
@@ -60,9 +54,9 @@ jobs:
             -n os-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/order-service:${IMAGE_TAG} \
-            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
-            --registry-username "${{ steps.reg.outputs.REG_USER }}" \
-            --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
+            --registry-username "${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" \
+            --registry-password "${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" \
             --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
@@ -77,9 +71,9 @@ jobs:
             -n ps-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/product-service:${IMAGE_TAG} \
-            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
-            --registry-username "${{ steps.reg.outputs.REG_USER }}" \
-            --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
+            --registry-username "${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" \
+            --registry-password "${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" \
             --os-type Linux \
             --cpu 1 --memory 1.5 \
             --ports 8000 \
@@ -94,9 +88,9 @@ jobs:
             -n fe-${RUN_ID} \
             -l "$LOCATION" \
             --image ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG} \
-            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
-            --registry-username "${{ steps.reg.outputs.REG_USER }}" \
-            --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
+            --registry-username "${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" \
+            --registry-password "${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" \
             --os-type Linux \
             --cpu 1 --memory 1.0 \
             --ports 80 \
@@ -117,7 +111,7 @@ jobs:
             done
           done
 
-      - name: Health check endpoints (non-blocking demo)
+      - name: Health check endpoints (non-blocking)
         continue-on-error: true
         run: |
           FRONTEND=http://fe-${RUN_ID}.${LOCATION}.azurecontainer.io
@@ -137,7 +131,7 @@ jobs:
               fi
               sleep 4
             done
-            echo "$NAME did not pass health check (ignored in demo)."
+            echo "$NAME did not pass health check (ignored for demo)."
             return 0
           }
 
