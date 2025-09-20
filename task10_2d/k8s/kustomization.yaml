@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: prod
+resources:
+  - namespace.yaml
+  - customer.yaml
+  - order.yaml
+  - product.yaml
+  - frontend.yaml
+images:
+  - name: nareshacr10d.azurecr.io/customer-service
+    newTag: 3d5b1eba6b7928fdf4ac302d2195e9dcb6ff1f86
+  - name: nareshacr10d.azurecr.io/order-service
+    newTag: 3d5b1eba6b7928fdf4ac302d2195e9dcb6ff1f86
+  - name: nareshacr10d.azurecr.io/product-service
+    newTag: 3d5b1eba6b7928fdf4ac302d2195e9dcb6ff1f86
+  - name: nareshacr10d.azurecr.io/frontend
+    newTag: 3d5b1eba6b7928fdf4ac302d2195e9dcb6ff1f86
