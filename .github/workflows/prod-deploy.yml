@@ -42,11 +42,11 @@ jobs:
 
       # Stamp the tag into kustomization.yaml (newTag: IMAGE_TAG_HERE -> newTag: <tag>)
       - name: Inject image tag into k8s manifests
-        shell: bash
+        working-directory: ${{ env.K8S_DIR }}
         run: |
-          sed -i "s/IMAGE_TAG_HERE/${{ steps.tag.outputs.tag }}/g" "${K8S_DIR}/kustomization.yaml"
-          echo "==== kustomization.yaml ===="
-          cat "${K8S_DIR}/kustomization.yaml"
+            sed -i "s/IMAGE_TAG_HERE/${{ steps.tag.outputs.tag }}/g" kustomization.yaml
+            echo "==== kustomization.yaml ===="
+            cat kustomization.yaml
 
       - name: Deploy to AKS (prod namespace via kustomize)
         shell: bash
