@@ -1,0 +1,153 @@
+name: Stage 2 - Temporary Staging (create -> deploy -> health-check -> destroy)
+
+on:
+  push:
+    branches: [ staging ]
+  workflow_dispatch:
+
+env:
+  RG_NAME: sit722-10-2d-rg
+  LOCATION: australiaeast
+  ACR_NAME: nareshacr10d
+  ACR_LOGIN_SERVER: nareshacr10d.azurecr.io
+  IMAGE_TAG: ${{ github.sha }}
+  RUN_ID: ${{ github.run_id }}
+
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (service principal JSON)
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Ensure RG exists (idempotent)
+        run: |
+          az group create -n "$RG_NAME" -l "$LOCATION" 1>/dev/null
+
+      - name: Prep registry auth (use SP creds)
+        id: reg
+        run: |
+          echo "REG_SERVER=${ACR_LOGIN_SERVER}" >> $GITHUB_OUTPUT
+          # Use the same SP that logged-in this workflow
+          echo "REG_USER=${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" >> $GITHUB_OUTPUT
+          echo "REG_PASS=${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" >> $GITHUB_OUTPUT
+
+      # ---------- Create temporary ACI for each service ----------
+      - name: Deploy customer-service (ACI)
+        run: |
+          az container create \
+            -g "$RG_NAME" \
+            -n cs-${RUN_ID} \
+            -l "$LOCATION" \
+            --image ${ACR_LOGIN_SERVER}/customer-service:${IMAGE_TAG} \
+            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
+            --registry-username "${{ steps.reg.outputs.REG_USER }}" \
+            --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --cpu 1 --memory 1.5 \
+            --ports 8000 \
+            --ip-address Public \
+            --dns-name-label cs-${RUN_ID} \
+            --restart-policy Never
+
+      - name: Deploy order-service (ACI)
+        run: |
+          az container create \
+            -g "$RG_NAME" \
+            -n os-${RUN_ID} \
+            -l "$LOCATION" \
+            --image ${ACR_LOGIN_SERVER}/order-service:${IMAGE_TAG} \
+            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
+            --registry-username "${{ steps.reg.outputs.REG_USER }}" \
+            --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --cpu 1 --memory 1.5 \
+            --ports 8000 \
+            --ip-address Public \
+            --dns-name-label os-${RUN_ID} \
+            --restart-policy Never
+
+      - name: Deploy product-service (ACI)
+        run: |
+          az container create \
+            -g "$RG_NAME" \
+            -n ps-${RUN_ID} \
+            -l "$LOCATION" \
+            --image ${ACR_LOGIN_SERVER}/product-service:${IMAGE_TAG} \
+            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
+            --registry-username "${{ steps.reg.outputs.REG_USER }}" \
+            --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --cpu 1 --memory 1.5 \
+            --ports 8000 \
+            --ip-address Public \
+            --dns-name-label ps-${RUN_ID} \
+            --restart-policy Never
+
+      - name: Deploy frontend (ACI)
+        run: |
+          az container create \
+            -g "$RG_NAME" \
+            -n fe-${RUN_ID} \
+            -l "$LOCATION" \
+            --image ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG} \
+            --registry-login-server "${{ steps.reg.outputs.REG_SERVER }}" \
+            --registry-username "${{ steps.reg.outputs.REG_USER }}" \
+            --registry-password "${{ steps.reg.outputs.REG_PASS }}" \
+            --cpu 1 --memory 1.0 \
+            --ports 80 \
+            --ip-address Public \
+            --dns-name-label fe-${RUN_ID} \
+            --restart-policy Never
+
+      # ---------- Simple health checks with retries ----------
+      - name: Wait for containers to be Running
+        run: |
+          for NAME in cs os ps fe; do
+            echo "Waiting for $NAME-${RUN_ID} to be Running..."
+            for i in {1..30}; do
+              STATE=$(az container show -g "$RG_NAME" -n ${NAME}-${RUN_ID} --query "instanceView.state" -o tsv || echo "Unknown")
+              echo "  Try $i: $STATE"
+              [ "$STATE" = "Running" ] && break
+              sleep 5
+            done
+          done
+
+      - name: Health check endpoints
+        continue-on-error: true   # demo-friendly: don't fail the whole job
+        run: |
+          set -e
+          FRONTEND=http://fe-${RUN_ID}.${LOCATION}.azurecontainer.io
+          CS=http://cs-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
+          OS=http://os-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
+          PS=http://ps-${RUN_ID}.${LOCATION}.azurecontainer.io:8000
+
+          check() {
+            URL="$1"; NAME="$2"; PORT="$3"
+            echo "Checking $NAME at $URL ..."
+            for i in {1..15}; do
+              CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+              echo "  Try $i -> $CODE"
+              if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ]; then
+                echo "$NAME OK"
+                return 0
+              fi
+              sleep 4
+            done
+            echo "$NAME did not pass health check (non-blocking in demo)."
+            return 0
+          }
+
+          check "$FRONTEND" "frontend" 80
+          check "$CS" "customer-service" 8000
+          check "$OS" "order-service" 8000
+          check "$PS" "product-service" 8000
+
+      # ---------- Always clean up (destroy staging) ----------
+      - name: Destroy staging (ACI)
+        if: always()
+        run: |
+          for NAME in cs os ps fe; do
+            az container delete -g "$RG_NAME" -n ${NAME}-${RUN_ID} --yes || true
+          done
